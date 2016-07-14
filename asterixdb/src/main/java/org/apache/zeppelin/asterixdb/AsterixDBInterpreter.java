@@ -17,6 +17,7 @@
 package org.apache.zeppelin.asterixdb;
 
 
+import com.github.wnameless.json.flattener.JsonFlattener;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
 import org.apache.zeppelin.interpreter.Interpreter;
@@ -27,32 +28,34 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.Properties;
+import java.util.*;
 
 /**
- * Apache AsterixDB Interpreter for Zeppelin.
+ * Apache AsterixDB AQL Interpreter for Zeppelin.
  */
 public class AsterixDBInterpreter extends Interpreter {
 
-  private static final String connectionAQL = "let $x := 'Hello World'; return $x";
-  private static final String ASTERIXDB_HOST = "asterixdb.host";
-  private static final String ASTERIXDB_PORT = "asterixdb.port";
+  private static Logger logger = LoggerFactory.getLogger(AsterixDBInterpreter.class);
+
+  private static final String CONNECTION_AQL = "let $x := 'Hello World'; return $x";
   private static final String JSON_VIEWER = "<html><head>" +
       "<script src=\"http://rawgit.com/abodelot/jquery.json-viewer/master/json-viewer"
       + "/jquery.json-viewer.js\"></script>\n"
       + "<link href=\"http://rawgit.com/abodelot/jquery.json-viewer/master/json-viewer"
       + "/jquery.json-viewer.css\" "
       + "type=\"text/css\" rel=\"stylesheet\" />\n";
-  private static Logger logger = LoggerFactory.getLogger(AsterixDBInterpreter.class);
+  protected static final String ASTERIXDB_HOST = "asterixdb.host";
+  protected static final String ASTERIXDB_PORT = "asterixdb.port";
+
+  protected final AsterixAPI api;
 
   static {
-    Interpreter.register("asterixdb", "asterixdb", AsterixDBInterpreter.class.getName(),
+    Interpreter.register("aql", "asterixdb", AsterixDBInterpreter.class.getName(),
         new InterpreterPropertyBuilder()
             .add(ASTERIXDB_HOST, "localhost", "The host for AsterixDB HTTP API")
             .add(ASTERIXDB_PORT, "19002", "The port for AsterixDB HTTP API").build());
   }
 
-  private final AsterixAPI api;
 
   public AsterixDBInterpreter(Properties property) {
     super(property);
@@ -63,9 +66,10 @@ public class AsterixDBInterpreter extends Interpreter {
 
   }
 
-  @Override public void open() {
+  @Override
+  public void open() {
     try {
-      String helloWorld = api.executeAQL(connectionAQL);
+      String helloWorld = api.executeAQL(CONNECTION_AQL);
       if (!helloWorld.contains("Hello World"))
         throw new IOException("AsterixDB did not return correct result: \n" + helloWorld);
     } catch (IOException e) {
@@ -74,16 +78,19 @@ public class AsterixDBInterpreter extends Interpreter {
 
   }
 
-  @Override public void close() {
+  @Override
+  public void close() {
     logger.debug("Connection closed.");
   }
 
-  @Override public InterpreterResult interpret(String aql, InterpreterContext context) {
-    boolean flatten = "+flat".equals(aql.substring(0, 5));
+
+  @Override
+  public InterpreterResult interpret(String query, InterpreterContext context) {
+    final boolean flatten = "%flat".equals(query.substring(0, 5));
 
     if (flatten)
-      aql = aql.substring(5);
-    String result = api.executeAQL(aql);
+      query = query.substring(5);
+    String result = getResult(query);
     if (result != null) {
       if (result.contains("error-code")) {
         JsonParser parser = new JsonParser();
@@ -92,27 +99,76 @@ public class AsterixDBInterpreter extends Interpreter {
       }
     }
 
+    InterpreterResult.Type resultType;
+    if (flatten) {
+      result = flatFormat(result);
+      resultType = InterpreterResult.Type.TABLE;
+    }
+    else {
+      result = jsonFormat(result, context.getParagraphId());
+      resultType = InterpreterResult.Type.HTML;
+    }
 
-    return new InterpreterResult(InterpreterResult.Code.SUCCESS,
-        InterpreterResult.Type.HTML, format(result, context.getParagraphId()));
+    return new InterpreterResult(InterpreterResult.Code.SUCCESS, resultType, result);
   }
 
-  @Override public void cancel(InterpreterContext context) {
+  protected String getResult(String query) {
+    return api.executeAQL(query);
+  }
+
+  @Override
+  public void cancel(InterpreterContext context) {
 
   }
 
-  @Override public FormType getFormType() {
+  @Override
+  public FormType getFormType() {
     return FormType.SIMPLE;
   }
 
-  @Override public int getProgress(InterpreterContext context) {
+  @Override
+  public int getProgress(InterpreterContext context) {
     return 0;
   }
 
-  private String format(String result, String id) {
+  private String jsonFormat(String result, String id) {
     return JSON_VIEWER + "<script>$('#json-renderer" + id + "').jsonViewer(" + result
         + ");</script></head><body><pre id=\"json-renderer" + id + "\"></pre></body>";
   }
 
+  private String flatFormat(String result) {
+    final JsonParser parser = new JsonParser();
+    final List<Map<String, Object>> flattenHits = new LinkedList<>();
+    final Set<String> keys = new TreeSet<>();
+
+    final JsonArray tuples = parser.parse(result).getAsJsonArray();
+
+    for (int i = 0; i < tuples.size(); i++) {
+      final String json = tuples.get(i).toString();
+      final Map<String, Object> flattenMap = JsonFlattener.flattenAsMap(json);
+      flattenHits.add(flattenMap);
+      for (String key : flattenMap.keySet()) {
+        keys.add(key);
+      }
+    }
+
+    final StringBuffer buffer = new StringBuffer();
+    for (String key : keys) {
+      buffer.append(key).append('\t');
+    }
+    buffer.replace(buffer.lastIndexOf("\t"), buffer.lastIndexOf("\t") + 1, "\n");
+
+    for (Map<String, Object> hit : flattenHits) {
+      for (String key : keys) {
+        final Object val = hit.get(key);
+        if (val != null) {
+          buffer.append(val);
+        }
+        buffer.append('\t');
+      }
+      buffer.replace(buffer.lastIndexOf("\t"), buffer.lastIndexOf("\t") + 1, "\n");
+    }
+    return buffer.toString();
+  }
 
 }
